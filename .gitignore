@@ -1,3 +1,7 @@
 data/
 models/
 .venv/
+CSL_EMG_Array/
+CSL-EMG_Array.zip
+CSL_EMG_Array.zip
+predictions*.xlsx

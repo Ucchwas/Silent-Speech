@@ -1,242 +1,114 @@
 import json
-import pickle
 from pathlib import Path
+from typing import Dict, List, Tuple
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-from scripts.data_utils import sliding_window, TextTransform, FeatureNormalizer
 
+from scripts.data_utils import FeatureNormalizer, TextTransform
 
-def extract_handcrafted_features(emg_signal, window_size=0.027, stride=0.010, sample_rate=800):
-    """
-    Extract handcrafted features from EMG signal as per the paper.
-    
-    The paper mentions extracting 112 time-varying features including:
-    - Temporal features (from Jou et al., 2006)
-    - Spectral features (from Gaddy and Klein, 2020)
-    
-    For simplicity, we'll implement common EMG features:
-    - Root Mean Square (RMS)
-    - Mean Absolute Value (MAV)
-    - Zero Crossing Rate (ZCR)
-    - Waveform Length (WL)
-    - Variance
-    - Standard Deviation
-    - Min/Max values
-    - Spectral features (FFT-based)
-    """
-    # Convert window size and stride from seconds to samples
-    window_samples = int(window_size * sample_rate)
-    stride_samples = int(stride * sample_rate)
-    
-    features_list = []
-    
-    # Sliding window over the signal
-    for i in range(0, len(emg_signal) - window_samples + 1, stride_samples):
-        window = emg_signal[i:i + window_samples]
-        
-        # Features for each channel
-        channel_features = []
-        for ch in range(window.shape[1]):
-            ch_data = window[:, ch]
-            
-            # Time domain features
-            rms = np.sqrt(np.mean(ch_data ** 2))
-            mav = np.mean(np.abs(ch_data))
-            var = np.var(ch_data)
-            std = np.std(ch_data)
-            min_val = np.min(ch_data)
-            max_val = np.max(ch_data)
-            
-            # Zero crossing rate
-            zero_crossings = np.sum(np.diff(np.sign(ch_data)) != 0)
-            zcr = zero_crossings / len(ch_data)
-            
-            # Waveform length
-            wl = np.sum(np.abs(np.diff(ch_data)))
-            
-            # Frequency domain features (simple FFT-based)
-            fft = np.fft.rfft(ch_data)
-            fft_mag = np.abs(fft)
-            
-            # Spectral features
-            spectral_mean = np.mean(fft_mag)
-            spectral_std = np.std(fft_mag)
-            spectral_max = np.max(fft_mag)
-            
-            # Power in different frequency bands
-            freqs = np.fft.rfftfreq(len(ch_data), 1/sample_rate)
-            low_power = np.sum(fft_mag[freqs < 50])
-            mid_power = np.sum(fft_mag[(freqs >= 50) & (freqs < 150)])
-            high_power = np.sum(fft_mag[freqs >= 150])
-            
-            # Combine features for this channel
-            features = [
-                rms, mav, var, std, min_val, max_val, zcr, wl,
-                spectral_mean, spectral_std, spectral_max,
-                low_power, mid_power, high_power
-            ]
-            
-            channel_features.extend(features)
-        
-        features_list.append(channel_features)
-    
-    return np.array(features_list)
-
+def _read_text(json_path: Path) -> str:
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    for k in ["text", "transcript", "sentence", "label"]:
+        if k in data and isinstance(data[k], str):
+            return data[k]
+    for v in data.values():
+        if isinstance(v, str):
+            return v
+    raise ValueError(f"No text field found in {json_path}")
 
 class ClosedVocabEMGDataset(Dataset):
     """
-    Dataset for closed vocabulary EMG-to-text conversion.
-    Follows the paper's approach with proper normalization.
+    Directory with pairs: *.npy (EMG (T,C)) and *.json (text).
+    If your npy files end with '_silent.npy', use strip_suffix='_silent'.
     """
-    
-    def __init__(
-        self,
-        data_dir,
-        normalizer_path=None,
-        window_size=14,
-        hop_size=7,
-        use_handcrafted=False,
-        fit_normalizer=True,
-        max_norm_samples=None
-    ):
+    def __init__(self,
+                 data_dir: str | Path,
+                 normalizer_path: str | Path,
+                 strip_suffix: str = "",
+                 fit_normalizer_if_missing: bool = True):
         self.data_dir = Path(data_dir)
-        self.window_size = window_size
-        self.hop_size = hop_size
-        self.use_handcrafted = use_handcrafted
-        self.text_transform = TextTransform()
-        
-        # Collect all file pairs
-        self.files = []
-        for npy_file in sorted(self.data_dir.glob("*_silent.npy")):
-            json_file = self.data_dir / f"{npy_file.stem.replace('_silent', '')}.json"
-            if json_file.exists():
-                self.files.append((npy_file, json_file))
-        
-        print(f"Found {len(self.files)} samples in {data_dir}")
-        
-        # Handle normalizer
-        self.normalizer = None
-        if normalizer_path and Path(normalizer_path).exists():
-            with open(normalizer_path, 'rb') as f:
-                self.normalizer = pickle.load(f)
-            print(f"Loaded normalizer from {normalizer_path}")
-        elif fit_normalizer and len(self.files) > 0:
-            # Fit normalizer on subset of data
-            print("Fitting normalizer...")
-            feature_samples = []
-            
-            num_samples = min(len(self.files), max_norm_samples or len(self.files))
-            for i in range(num_samples):
-                npy_file, _ = self.files[i]
-                emg = np.load(npy_file)
-                
-                if self.use_handcrafted:
-                    features = extract_handcrafted_features(emg)
-                else:
-                    # For raw EMG, normalize the full signal
-                    features = emg
-                
-                feature_samples.append(features)
-            
-            # Concatenate all features
-            all_features = np.concatenate(feature_samples, axis=0)
-            self.normalizer = FeatureNormalizer([all_features], share_scale=False)
-            
-            # Save normalizer if path provided
-            if normalizer_path:
-                Path(normalizer_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(normalizer_path, 'wb') as f:
-                    pickle.dump(self.normalizer, f)
-                print(f"Saved normalizer to {normalizer_path}")
-    
-    def __len__(self):
-        return len(self.files)
-    
-    def __getitem__(self, idx):
-        npy_file, json_file = self.files[idx]
-        
-        # Load EMG signal
-        emg = np.load(npy_file)  # (T, C)
-        
-        if self.use_handcrafted:
-            # Extract handcrafted features
-            features = extract_handcrafted_features(emg)
+        self.strip_suffix = strip_suffix
+        self.text = TextTransform()
+        self.pairs: List[Tuple[Path, Path]] = []
+
+        for npy in sorted(self.data_dir.glob("*.npy")):
+            stem = npy.stem
+            if strip_suffix and stem.endswith(strip_suffix):
+                stem = stem[: -len(strip_suffix)]
+            js = self.data_dir / f"{stem}.json"
+            if js.exists():
+                self.pairs.append((npy, js))
+
+        if not self.pairs:
+            raise RuntimeError(f"No (.npy, .json) pairs found in {self.data_dir}")
+
+        # Normalizer
+        self.normalizer = FeatureNormalizer()
+        normalizer_path = Path(normalizer_path)
+        if normalizer_path.exists():
+            self.normalizer.load(normalizer_path)
         else:
-            # Use raw EMG
-            features = emg
-        
-        # Normalize
-        if self.normalizer:
-            features = self.normalizer.normalize(features)
-        
-        # Load text
-        with open(json_file, 'r') as f:
-            meta = json.load(f)
-        text = meta['text']
-        
-        # Convert text to character indices
-        char_indices = self.text_transform.text_to_int(text)
-        
-        # Convert to tensors
-        features_tensor = torch.FloatTensor(features)
-        char_tensor = torch.LongTensor(char_indices)
-        
-        return features_tensor, char_tensor
+            if not fit_normalizer_if_missing:
+                raise FileNotFoundError(f"Missing normalizer at {normalizer_path}")
+            feats = [np.load(p[0]) for p in self.pairs]
+            self.normalizer.fit(feats)
+            normalizer_path.parent.mkdir(parents=True, exist_ok=True)
+            self.normalizer.save(normalizer_path)
 
+    def __len__(self):
+        return len(self.pairs)
 
-def collate_fn(batch):
-    """Collate function with proper padding"""
-    features, chars = zip(*batch)
-    
-    # Pad feature sequences
-    max_feat_len = max(f.shape[0] for f in features)
-    feat_dim = features[0].shape[1]
-    
-    padded_features = []
-    for feat in features:
-        pad_len = max_feat_len - feat.shape[0]
-        if pad_len > 0:
-            feat = torch.nn.functional.pad(feat, (0, 0, 0, pad_len))
-        padded_features.append(feat)
-    
-    # Pad character sequences
-    max_char_len = max(c.shape[0] for c in chars)
-    padded_chars = []
-    for char in chars:
-        pad_len = max_char_len - char.shape[0]
-        if pad_len > 0:
-            char = torch.nn.functional.pad(char, (0, pad_len), value=-100)
-        padded_chars.append(char)
-    
-    features_batch = torch.stack(padded_features)
-    chars_batch = torch.stack(padded_chars)
-    
-    return features_batch, chars_batch
+    def __getitem__(self, idx: int):
+        npy_path, js_path = self.pairs[idx]
+        x = np.load(npy_path).astype(np.float32)  # (T, C)
+        x = self.normalizer.transform(x)
+        y_txt = _read_text(js_path)
 
+        ids = self.text.text_to_ids(y_txt, add_bos_eos=True)
+        in_ids = torch.tensor(ids[:-1], dtype=torch.long)   # starts with BOS
+        out_ids = torch.tensor(ids[1:], dtype=torch.long)   # includes EOS
 
-def get_dataloader(
-    data_dir,
-    normalizer_path=None,
-    batch_size=8,
-    shuffle=True,
-    num_workers=4,
-    use_handcrafted=False,
-    **kwargs
-):
-    """Create dataloader for EMG dataset"""
-    dataset = ClosedVocabEMGDataset(
-        data_dir,
-        normalizer_path=normalizer_path,
-        use_handcrafted=use_handcrafted,
-        **kwargs
-    )
-    
+        x = torch.tensor(x, dtype=torch.float32)
+        return {"emg": x, "in_ids": in_ids, "out_ids": out_ids,
+                "txt": y_txt, "name": npy_path.stem}
+
+def collate_fn(batch: List[Dict]):
+    # EMG pad
+    T = [b["emg"].shape[0] for b in batch]
+    C = batch[0]["emg"].shape[1]
+    maxT = max(T)
+    emg = torch.zeros(len(batch), maxT, C, dtype=torch.float32)
+    emg_mask = torch.zeros(len(batch), maxT, dtype=torch.bool)
+    for i, b in enumerate(batch):
+        t = b["emg"].shape[0]
+        emg[i, :t] = b["emg"]
+        emg_mask[i, :t] = True
+
+    # Char pad
+    L = [len(b["in_ids"]) for b in batch]
+    maxL = max(L)
+    in_pad = TextTransform.PAD_IDX
+    out_pad = -100  # CE ignore
+    in_ids = torch.full((len(batch), maxL), in_pad, dtype=torch.long)
+    out_ids = torch.full((len(batch), maxL), out_pad, dtype=torch.long)
+    char_mask = torch.zeros(len(batch), maxL, dtype=torch.bool)
+    for i, b in enumerate(batch):
+        l = len(b["in_ids"])
+        in_ids[i, :l] = b["in_ids"]
+        out_ids[i, :l] = b["out_ids"]
+        char_mask[i, :l] = True
+
+    names = [b["name"] for b in batch]
+    txts = [b["txt"] for b in batch]
+    return {"emg": emg, "emg_mask": emg_mask,
+            "in_ids": in_ids, "out_ids": out_ids, "char_mask": char_mask,
+            "names": names, "txts": txts}
+
+def make_loader(data_dir, normalizer_path, batch_size=4, shuffle=True, num_workers=0, strip_suffix=""):
+    ds = ClosedVocabEMGDataset(data_dir, normalizer_path=normalizer_path, strip_suffix=strip_suffix)
     return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True
+        ds, batch_size=batch_size, shuffle=shuffle,
+        num_workers=num_workers, pin_memory=torch.cuda.is_available(),
+        collate_fn=collate_fn
     )
