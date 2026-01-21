@@ -39,9 +39,11 @@ class FeatureNormalizer:
     def load(self, path: str):
         with open(path, "rb") as f:
             self.state = pickle.load(f)
+        return self
 
 class TextTransform:
     BASE_CHARS = string.ascii_lowercase + string.digits + " "
+    VOCAB_OFFSET = 0
     BOS_IDX = len(BASE_CHARS)
     EOS_IDX = len(BASE_CHARS) + 1
     PAD_IDX = len(BASE_CHARS) + 2
