@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 ## Silent-Speech (EMG → Text → Audio)
 
 End-to-end pipeline for silent speech recognition from multi-channel EMG.
@@ -67,12 +66,3 @@ deactivate
 conda activate ss2
 # enter TTS venv again
 source $HOME/venvs/ttscpu310/bin/activate
-
-🧩 Notes
-
-Different EMG channel counts: set the adapter’s in_dim to your dataset’s channels (or auto-detect in train_emg_llm.py).
-
-Convert multi-channel EMG to text (and optional audio) by training a compact EMG→LLM interface on top of a frozen LLaMA, achieving strong WER with limited data.
-=======
-# Silent-Speech
->>>>>>> e243d11 (Modified training and evaluation)
