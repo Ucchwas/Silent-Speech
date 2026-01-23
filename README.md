@@ -1,68 +1,75 @@
-## Silent-Speech (EMG → Text → Audio)
+# Silent-Speech: Facial EMG → Text with LLM + NeuroSymbolic Decoding
 
-End-to-end pipeline for silent speech recognition from multi-channel EMG.
-We keep the LLM frozen and train a small EMG adapter + LM head (with soft-prompt and optional CTC aux loss).
-Optionally synthesize audio from the predicted text.
+This repository implements **silent speech recognition from facial EMG** by conditioning a **frozen decoder-only LLM** on EMG embeddings. Only lightweight modules are trained: an **EMG adapter**, a **soft prompt**, and an **autoregressive (AR) character head** (optional **CTC head**).  
+At inference, **NeuroSymbolic (NS) decoding** improves reliability using **lexicon/trie constraints** and **character 5-gram fusion**, with tunable boundary control (**β, κ, γ**) to reduce spelling/spacing errors and insertions.
 
-🚀 Quick start
-1) Split
-python scripts/split_data.py
+Optionally, the pipeline can generate **audio** from predicted text using a CPU **Text-to-Speech (TTS)** script.
 
-2) Train (EMG → LLM)
+---
+
+## Features
+- **EMG → Text** with a frozen decoder-only LLM conditioned on EMG embeddings
+- Trainable lightweight modules:
+  - EMG adapter
+  - soft prompt
+  - AR head (optional CTC head)
+- **NeuroSymbolic decoding** (inference-time control):
+  - lexicon/trie constraints
+  - character 5-gram fusion (**β**)
+  - word bonus (**κ**) + OOV penalty (**γ**)
+  - optional CTC candidate proposals + NS reranking
+- Optional **TTS** to generate `.wav` files from predictions
+
+---
+
+## Installation
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -U pip
+pip install -r requirements.txt
+```
+
+
+## EMG → Text
+Prepare splits
+```bash
+python split_data.py
+```
+
+## Train
+```bash
 python train_emg_llm.py
+```
 
-3) Inference (write predictions.xlsx)
+## Inference
+```bash
 python inference_emg_llm.py \
   --ckpt artifacts/checkpoint.pt \
   --normalizer artifacts/emg_norm.pkl \
   --val_dir data/val_emg \
   --output predictions.xlsx
+```
 
-🔊 (Optional) Text-to-Speech on CPU (separate venv)
-
-Create a lightweight venv for TTS (keeps your training env clean):
-
-python3.10 -m venv $HOME/venvs/ttscpu310
-source $HOME/venvs/ttscpu310/bin/activate
-pip install -U pip
-pip install --no-cache-dir "numpy==1.26.4" "pandas==2.2.2" "openpyxl==3.1.2" "soundfile==0.12.1"
-pip install --no-cache-dir torch==2.5.1+cpu torchaudio==2.5.1+cpu \
-  --index-url https://download.pytorch.org/whl/cpu
-pip install --no-cache-dir TTS==0.22.0
+## Outputs
+- predictions.xlsx — text predictions
+- artifacts/ — checkpoints, normalizer, logs, and other run artifacts
 
 
-Install espeak-ng locally (phonemizer backend for Coqui TTS):
+## NeuroSymbolic Decoding (NS)
 
-cd $HOME
-wget https://github.com/espeak-ng/espeak-ng/archive/refs/tags/1.51.tar.gz
-tar xzf 1.51.tar.gz
-cd espeak-ng-1.51
-./autogen.sh
-./configure --prefix=$HOME/.local
-make -j4 && make install
+NS decoding is inference-time control that combines neural scores with structured constraints:
+Trie/lexicon constraint: blocks invalid spellings/words for closed/template vocabularies
+Character 5-gram fusion (β): stabilizes spelling and spaces
+Word bonus (κ) + OOV penalty (γ): controls word boundaries and reduces insertions
+Optional: CTC candidate proposals + NS reranking for extra robustness
 
-# make it discoverable
-export PATH=$HOME/.local/bin:$PATH
-export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH
-export PHONEMIZER_ESPEAK_PATH=$HOME/.local/bin/espeak-ng
-espeak-ng --version
+## Audio (Optional)
 
-
-Synthesize WAVs from predictions:
-
-# inside the TTS venv
+Generate .wav files (one per prediction row) using the Coqui TTS helper script:
+```bash
 python scripts/tts_from_predictions_coqui.py \
   --xlsx predictions.xlsx \
   --out_dir artifacts/audio_preds \
-  --col prediction \
-  --model tts_models/en/ljspeech/vits
-
-
-Switching envs
-
-# leave TTS venv
-deactivate
-# back to training env (example)
-conda activate ss2
-# enter TTS venv again
-source $HOME/venvs/ttscpu310/bin/activate
+  --col prediction
+```
